@@ -3,6 +3,10 @@ import Tun2SocksKitC
 import HevSocks5Tunnel
 
 public enum Socks5Tunnel {
+    public enum Config {
+        case file(path: URL)
+        case string(content: String)
+    }
     
     private static var tunnelFileDescriptor: Int32? {
         var ctlInfo = ctl_info()
@@ -63,12 +67,40 @@ public enum Socks5Tunnel {
     
     @discardableResult
     public static func run(withConfig filePath: String) -> Int32 {
+        run(withConfig: .file(path: URL(fileURLWithPath: filePath)))
+    }
+
+    /// Blocks until shutdown or an error. The caller owns thread and lifecycle coordination.
+    @discardableResult
+    public static func run(withConfig config: Config) -> Int32 {
         guard let fileDescriptor = self.tunnelFileDescriptor else {
-            fatalError("Get tunnel file descriptor failed.")
+            return -1
         }
-        return hev_socks5_tunnel_main(filePath.cString(using: .utf8), fileDescriptor)
+        return run(withFileDescriptor: fileDescriptor, config: config)
+    }
+
+    /// Runs on a caller-owned descriptor, which the core does not close.
+    /// Only one run may be active in the process, including during cleanup.
+    @discardableResult
+    public static func run(withFileDescriptor fileDescriptor: Int32, config: Config) -> Int32 {
+        guard fileDescriptor >= 0 else { return -1 }
+        switch config {
+        case .file(let path):
+            guard path.isFileURL else { return -1 }
+            return path.path.withCString { hev_socks5_tunnel_main($0, fileDescriptor) }
+        case .string(let content):
+            // The C API takes a UTF-8 byte count, not Swift's character count.
+            // Keep a non-null buffer even for empty input (libyaml requires it).
+            let bytes = Array(content.utf8) + [0]
+            guard let length = UInt32(exactly: bytes.count - 1) else { return -1 }
+            return bytes.withUnsafeBufferPointer {
+                hev_socks5_tunnel_main_from_str($0.baseAddress, length, fileDescriptor)
+            }
+        }
     }
     
+    /// Requests shutdown; wait for run() to return before starting another run.
+    /// Do not call while idle: the core latches an early stop for the next run.
     public static func quit() {
         hev_socks5_tunnel_quit()
     }
